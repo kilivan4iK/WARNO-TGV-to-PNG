@@ -14,9 +14,8 @@ Unzip Converter.zip in to folder with tgv files and run start.bat
 \\\\\\\\\\\\\
 <img width="1346" height="548" alt="image" src="https://github.com/user-attachments/assets/4335c8ca-6f5d-46a6-a18c-7fea56827b7b" />
 
-DDS files u can view and edit in Photoshop using Nvidia dds editor Plugin
-And also in Photoshop convert it to PNG
-https://developer.nvidia.com/downloads/texture-tools-photoshop-plugin
+# DDS files u can view and edit in Photoshop using Nvidia dds editor Plugin
+## And also in Photoshop convert it to PNG https://developer.nvidia.com/downloads/texture-tools-photoshop-plugin
 <img width="1208" height="717" alt="image" src="https://github.com/user-attachments/assets/8933c994-20c0-47b0-a85e-0e97307b94f7" />
 <img width="388" height="213" alt="image" src="https://github.com/user-attachments/assets/9e04bfa1-be07-42d9-b15e-20ce16cc46b9" />
 <img width="1078" height="837" alt="image" src="https://github.com/user-attachments/assets/147f4abc-7db9-447d-a2d6-0b02f40d0469" />
