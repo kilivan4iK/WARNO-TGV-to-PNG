@@ -1,4 +1,5 @@
 U need Python and zstardard
+-
 Install first Python https://www.python.org/downloads/
 And then use zstandard_install.bat
 
