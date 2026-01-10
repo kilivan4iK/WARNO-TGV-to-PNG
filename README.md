@@ -1,7 +1,8 @@
-U need Python and zstandard
+WARNO TGV 
 -
-Install first Python https://www.python.org/downloads/
-And then use zstandard_install.bat
+U need Python and zstandard
+>Install first Python https://www.python.org/downloads/
+> And then use zstandard_install.bat
 
 
 
