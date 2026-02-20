@@ -1209,10 +1209,17 @@ def convert_one(
         print(f"     + {extra.name}")
 
 
-def convert_path(input_path: Path, output_arg: str | None, recursive: bool, split_mode: str, mirror: bool) -> None:
+def convert_path(
+    input_path: Path,
+    output_arg: str | None,
+    recursive: bool,
+    split_mode: str,
+    mirror: bool,
+    auto_naming: bool,
+) -> None:
     if input_path.is_file():
         parent = input_path.parent
-        unit_name = find_unit_name_in_folder(parent)
+        unit_name = find_unit_name_in_folder(parent) if auto_naming else None
         atlas_category = detect_atlas_category_in_folder(parent)
         stem = canonical_stem_for_file(input_path, unit_name)
         shared_layout = build_layout_for_group([input_path]) if split_mode == "auto" else None
@@ -1251,12 +1258,12 @@ def convert_path(input_path: Path, output_arg: str | None, recursive: bool, spli
     for file_path in files:
         rel = file_path.relative_to(input_path)
         parent = file_path.parent
-        if parent not in unit_cache:
+        if auto_naming and parent not in unit_cache:
             unit_cache[parent] = find_unit_name_in_folder(parent)
         if parent not in atlas_category_cache:
             atlas_category_cache[parent] = detect_atlas_category_in_folder(parent)
 
-        stem = canonical_stem_for_file(file_path, unit_cache[parent])
+        stem = canonical_stem_for_file(file_path, unit_cache.get(parent))
         out_file = (out_dir / rel.parent / f"{stem}.png")
         convert_one(
             file_path,
@@ -1291,9 +1298,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Mirror textures horizontally before saving",
     )
     parser.add_argument(
-        "--ask-mirror",
+        "--auto-naming",
+        dest="auto_naming",
         action="store_true",
-        help="Ask interactively whether to mirror textures",
+        default=True,
+        help="Use atlas-based canonical names like Unit_D / Unit_NM (default: on)",
+    )
+    parser.add_argument(
+        "--no-auto-naming",
+        dest="auto_naming",
+        action="store_false",
+        help="Keep original source file names",
     )
     return parser
 
@@ -1302,13 +1317,15 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    mirror = args.mirror
-    if args.ask_mirror:
-        answer = input("Mirror textures horizontally? [y/N]: ").strip().lower()
-        mirror = answer in ("y", "yes", "1", "true")
-
     try:
-        convert_path(Path(args.input), args.output, args.recursive, args.split, mirror)
+        convert_path(
+            Path(args.input),
+            args.output,
+            args.recursive,
+            args.split,
+            args.mirror,
+            args.auto_naming,
+        )
     except Exception as exc:  # keep CLI output user-friendly
         print(f"[ERROR] {exc}")
         return 1
