@@ -298,6 +298,27 @@ def extract_unit_name_from_atlas(atlas_path: Path) -> str | None:
     return None
 
 
+def atlas_category_from_text(text: str) -> str | None:
+    up = text.upper()
+    if "/UNITS/" in up:
+        return "unit"
+    if "/DECORS/" in up:
+        return "decor"
+    return None
+
+
+def detect_atlas_category_in_folder(folder: Path) -> str | None:
+    for atlas_path in sorted(folder.glob("*.atlas")):
+        try:
+            text = atlas_path.read_bytes().decode("latin1", errors="ignore")
+        except OSError:
+            continue
+        category = atlas_category_from_text(text)
+        if category:
+            return category
+    return None
+
+
 def find_unit_name_in_folder(folder: Path) -> str | None:
     for atlas_path in sorted(folder.glob("*.atlas")):
         unit_name = extract_unit_name_from_atlas(atlas_path)
@@ -500,13 +521,54 @@ def split_range_by_color_jump(
     return [(x0, cut), (cut, x1)]
 
 
-def align_bbox_to_4px(bbox: tuple[int, int, int, int], width: int, height: int) -> tuple[int, int, int, int]:
+def align_bbox_to_grid(
+    bbox: tuple[int, int, int, int],
+    width: int,
+    height: int,
+    grid: int = 2,
+) -> tuple[int, int, int, int]:
     x0, y0, x1, y1 = bbox
-    x0 = max(0, (x0 // 4) * 4)
-    y0 = max(0, (y0 // 4) * 4)
-    x1 = min(width, ((x1 + 3) // 4) * 4)
-    y1 = min(height, ((y1 + 3) // 4) * 4)
+    g = max(1, int(grid))
+    x0 = max(0, (x0 // g) * g)
+    y0 = max(0, (y0 // g) * g)
+    x1 = min(width, ((x1 + g - 1) // g) * g)
+    y1 = min(height, ((y1 + g - 1) // g) * g)
     return x0, y0, x1, y1
+
+
+def snap_value_to_anchors(value: int, anchors: list[int], tol: int) -> int:
+    if not anchors:
+        return value
+    nearest = min(anchors, key=lambda a: abs(a - value))
+    if abs(nearest - value) <= tol:
+        return nearest
+    return value
+
+
+def snap_box_to_major_grid(
+    box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    tol_x: int | None = None,
+    tol_y: int | None = None,
+    grid: int = 2,
+) -> tuple[int, int, int, int]:
+    width, height = image_size
+    x0, y0, x1, y1 = box
+
+    if tol_x is None:
+        tol_x = max(4, width // 512)
+    if tol_y is None:
+        tol_y = max(4, height // 512)
+
+    anchors_x = sorted(set([0, width // 4, width // 2, (width * 3) // 4, width]))
+    anchors_y = sorted(set([0, height // 4, height // 2, (height * 3) // 4, height]))
+
+    x0 = snap_value_to_anchors(x0, anchors_x, tol_x)
+    x1 = snap_value_to_anchors(x1, anchors_x, tol_x)
+    y0 = snap_value_to_anchors(y0, anchors_y, tol_y)
+    y1 = snap_value_to_anchors(y1, anchors_y, tol_y)
+
+    return align_bbox_to_grid((x0, y0, x1, y1), width, height, grid=grid)
 
 
 def bbox_from_row_range(mask: "np.ndarray", y0: int, y1: int) -> tuple[int, int, int, int] | None:
@@ -583,7 +645,7 @@ def detect_main_and_aux_bboxes(
     main_box = bbox_from_row_range(fg, main_y0, main_y1)
     if main_box is None:
         return None, []
-    main_box = align_bbox_to_4px(main_box, width, height)
+    main_box = align_bbox_to_grid(main_box, width, height, grid=2)
 
     aux_boxes: list[tuple[int, int, int, int]] = []
     if main_y1 < height:
@@ -632,7 +694,7 @@ def detect_main_and_aux_bboxes(
                 by0 = int(main_y1 + y0_rel + rows_any[0])
                 by1 = int(main_y1 + y0_rel + rows_any[-1] + 1)
 
-                box = align_bbox_to_4px((bx0, by0, bx1, by1), width, height)
+                box = align_bbox_to_grid((bx0, by0, bx1, by1), width, height, grid=2)
                 area = (box[2] - box[0]) * (box[3] - box[1])
                 if area >= (width * height) // 500:
                     aux_boxes.append(box)
@@ -644,16 +706,31 @@ def detect_main_and_aux_bboxes(
 
 
 def part_output_path(out_main: Path, role: str, part_kind: str) -> Path:
-    role_low = role.lower()
     base, tag = split_base_and_tag(out_main.stem)
     if tag:
         return out_main.with_name(f"{base}_{part_kind}_{tag}.png")
-    return out_main.with_name(f"{out_main.stem}_{part_kind.lower()}_{role_low}.png")
+    return out_main.with_name(f"{out_main.stem}_{part_kind.lower()}.png")
 
 
-def assign_part_kinds(aux_boxes: list[tuple[int, int, int, int]]) -> list[str]:
+def assign_part_kinds(
+    aux_boxes: list[tuple[int, int, int, int]],
+    atlas_category: str | None,
+) -> list[str]:
     if not aux_boxes:
         return []
+
+    if atlas_category != "unit":
+        kinds = ["" for _ in aux_boxes]
+        order = sorted(
+            range(len(aux_boxes)),
+            key=lambda i: (
+                (aux_boxes[i][0] + aux_boxes[i][2]) * 0.5,
+                (aux_boxes[i][1] + aux_boxes[i][3]) * 0.5,
+            ),
+        )
+        for part_no, idx in enumerate(order, start=1):
+            kinds[idx] = f"PART{part_no}"
+        return kinds
 
     centers = [((b[0] + b[2]) * 0.5, i) for i, b in enumerate(aux_boxes)]
     track_idx = max(centers, key=lambda t: t[0])[1]  # right-most block is usually tracks
@@ -727,7 +804,173 @@ def scale_box(box: tuple[int, int, int, int], src_size: tuple[int, int], dst_siz
     y0 = int(round(box[1] * sy))
     x1 = int(round(box[2] * sx))
     y1 = int(round(box[3] * sy))
-    return align_bbox_to_4px((x0, y0, x1, y1), dst_size[0], dst_size[1])
+    return align_bbox_to_grid((x0, y0, x1, y1), dst_size[0], dst_size[1], grid=2)
+
+
+def box_area(box: tuple[int, int, int, int]) -> int:
+    return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+
+def dominant_corner_bg_rgb(arr: "np.ndarray") -> "np.ndarray":
+    height, width, _ = arr.shape
+    corner_sample = np.array(
+        [
+            arr[0, 0],
+            arr[0, width - 1],
+            arr[height - 1, 0],
+            arr[height - 1, width - 1],
+            arr[max(0, height - 2), max(0, width - 2)],
+        ],
+        dtype=np.uint8,
+    )
+    colors, counts = np.unique(corner_sample, axis=0, return_counts=True)
+    return colors[counts.argmax()]
+
+
+def tighten_box_to_mask(
+    mask: "np.ndarray",
+    box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    grid: int = 2,
+    pad: int = 2,
+) -> tuple[int, int, int, int] | None:
+    x0, y0, x1, y1 = box
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    sub = mask[y0:y1, x0:x1]
+    if sub.size == 0 or not sub.any():
+        return None
+
+    h = max(1, y1 - y0)
+    w = max(1, x1 - x0)
+    row_ratio = sub.mean(axis=1)
+    col_ratio = sub.mean(axis=0)
+
+    row_thr = max(0.002, 1.0 / float(w))
+    col_thr = max(0.002, 1.0 / float(h))
+
+    rows = np.where(row_ratio >= row_thr)[0]
+    cols = np.where(col_ratio >= col_thr)[0]
+    if rows.size == 0:
+        rows = np.where(sub.any(axis=1))[0]
+    if cols.size == 0:
+        cols = np.where(sub.any(axis=0))[0]
+    if rows.size == 0 or cols.size == 0:
+        return None
+
+    tx0 = x0 + int(cols[0]) - pad
+    ty0 = y0 + int(rows[0]) - pad
+    tx1 = x0 + int(cols[-1]) + 1 + pad
+    ty1 = y0 + int(rows[-1]) + 1 + pad
+    return align_bbox_to_grid((tx0, ty0, tx1, ty1), image_size[0], image_size[1], grid=grid)
+
+
+def refine_layout_to_content(
+    image: Image.Image,
+    main_box: tuple[int, int, int, int] | None,
+    aux_boxes: list[tuple[int, int, int, int]],
+) -> tuple[tuple[int, int, int, int] | None, list[tuple[int, int, int, int]]]:
+    if np is None:
+        return main_box, aux_boxes
+
+    arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    if arr.size == 0:
+        return main_box, aux_boxes
+
+    bg = dominant_corner_bg_rgb(arr)
+    diff = np.abs(arr.astype(np.int16) - bg.astype(np.int16)).max(axis=2)
+    mask = diff > 4
+
+    refined_main = main_box
+    if main_box is not None:
+        tightened = tighten_box_to_mask(mask, main_box, image.size, grid=2, pad=2)
+        if tightened is not None and box_area(tightened) > 0:
+            refined_main = snap_box_to_major_grid(tightened, image.size, grid=2)
+
+    refined_aux: list[tuple[int, int, int, int]] = []
+    min_area = max(64, (image.size[0] * image.size[1]) // 4000)
+    for box in aux_boxes:
+        tightened = tighten_box_to_mask(mask, box, image.size, grid=2, pad=2)
+        if tightened is None:
+            continue
+        tightened = snap_box_to_major_grid(tightened, image.size, grid=2)
+        if box_area(tightened) < min_area:
+            continue
+        refined_aux.append(tightened)
+
+    refined_aux = list(dict.fromkeys(refined_aux))
+    refined_aux.sort(key=box_area, reverse=True)
+    return refined_main, refined_aux
+
+
+def filter_aux_boxes_for_parts(
+    aux_boxes: list[tuple[int, int, int, int]],
+    image_size: tuple[int, int],
+) -> list[tuple[int, int, int, int]]:
+    width, height = image_size
+    total = float(width * height)
+    min_w = max(16, int(width * 0.02))
+    min_h = max(16, int(height * 0.02))
+
+    kept: list[tuple[int, int, int, int]] = []
+    for box in aux_boxes:
+        w = box[2] - box[0]
+        h = box[3] - box[1]
+        if w < min_w or h < min_h:
+            continue
+
+        area = float(w * h)
+        area_ratio = area / total
+        if area_ratio < 0.002:
+            continue
+
+        aspect = max(w / max(1, h), h / max(1, w))
+        if aspect > 12.0 and area_ratio < 0.015:
+            continue
+
+        kept.append(box)
+
+    kept.sort(key=box_area, reverse=True)
+    return kept
+
+
+def should_split_layout(
+    image_size: tuple[int, int],
+    main_box: tuple[int, int, int, int] | None,
+    aux_boxes: list[tuple[int, int, int, int]],
+    atlas_category: str | None,
+) -> bool:
+    if main_box is None or not aux_boxes:
+        return False
+
+    width, height = image_size
+    total = float(width * height)
+    main_ratio = box_area(main_box) / total
+
+    if main_ratio < 0.20 or main_ratio > 0.90:
+        return False
+
+    aux_areas = [box_area(b) / total for b in aux_boxes]
+    significant = [a for a in aux_areas if a >= 0.012]
+    if not significant:
+        return False
+
+    total_aux = float(sum(aux_areas))
+    if total_aux < 0.015:
+        return False
+
+    # Avoid noisy over-splitting on dense atlases with many tiny pieces.
+    if len(aux_boxes) > 4 and total_aux < 0.08:
+        return False
+
+    if atlas_category == "unit":
+        return True
+    if atlas_category == "decor":
+        return total_aux >= 0.025 and len(significant) >= 1
+
+    # Unknown atlas type: require stronger signal to avoid false positives.
+    return (len(significant) >= 2 and total_aux >= 0.03) or total_aux >= 0.05
 
 
 def normal_reconstruct_z(rgb: Image.Image) -> tuple[Image.Image, Image.Image]:
@@ -856,12 +1099,34 @@ def resolve_output_file(in_file: Path, output_arg: str | None, stem_override: st
     return out / f"{stem}.png"
 
 
+def cleanup_stale_outputs(out_main: Path) -> None:
+    parent = out_main.parent
+    base, tag = split_base_and_tag(out_main.stem)
+
+    candidates: set[Path] = {out_main}
+    candidates.update(parent.glob(f"{out_main.stem}_*.png"))
+
+    # Remove old split-part files from previous runs for the same logical texture.
+    if tag:
+        candidates.update(parent.glob(f"{base}_*_{tag}.png"))
+        candidates.update(parent.glob(f"{base}_*_{tag}_*.png"))
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def convert_one(
     in_file: Path,
     out_file: Path,
     split_mode: str,
     mirror: bool,
     shared_layout: LayoutInfo | None = None,
+    atlas_category: str | None = None,
 ) -> None:
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -901,14 +1166,22 @@ def convert_one(
         else:
             main_box, aux_boxes = detect_main_and_aux_bboxes(source_for_split.convert("RGB"))
 
+        main_box, aux_boxes = refine_layout_to_content(source_for_split.convert("RGB"), main_box, aux_boxes)
+        aux_boxes = filter_aux_boxes_for_parts(aux_boxes, source_for_split.size)
+        if not should_split_layout(source_for_split.size, main_box, aux_boxes, atlas_category):
+            main_box = None
+            aux_boxes = []
+
         if main_box is not None:
             image_to_save = source_for_split.crop(main_box)
 
-        part_kinds = assign_part_kinds(aux_boxes)
+        part_kinds = assign_part_kinds(aux_boxes, atlas_category)
         for idx, box in enumerate(aux_boxes):
             kind = part_kinds[idx] if idx < len(part_kinds) and part_kinds[idx] else f"PART{idx + 1}"
             part_out = part_output_path(out_file, role, kind)
             part_images.append((source_for_split.crop(box), part_out))
+
+    cleanup_stale_outputs(out_file)
 
     image_to_save = maybe_mirror(image_to_save, mirror)
     image_to_save.save(out_file)
@@ -918,7 +1191,8 @@ def convert_one(
         part_image.save(part_out)
         extras.append(part_out)
         if split_mode == "auto":
-            extras.extend(save_auto_channels(part_image, role, part_out))
+            if atlas_category == "unit":
+                extras.extend(save_auto_channels(part_image, role, part_out))
         elif split_mode == "all":
             extras.extend(save_all_channels(part_image, part_out))
 
@@ -937,7 +1211,9 @@ def convert_one(
 
 def convert_path(input_path: Path, output_arg: str | None, recursive: bool, split_mode: str, mirror: bool) -> None:
     if input_path.is_file():
-        unit_name = find_unit_name_in_folder(input_path.parent)
+        parent = input_path.parent
+        unit_name = find_unit_name_in_folder(parent)
+        atlas_category = detect_atlas_category_in_folder(parent)
         stem = canonical_stem_for_file(input_path, unit_name)
         shared_layout = build_layout_for_group([input_path]) if split_mode == "auto" else None
         convert_one(
@@ -946,6 +1222,7 @@ def convert_path(input_path: Path, output_arg: str | None, recursive: bool, spli
             split_mode,
             mirror,
             shared_layout=shared_layout,
+            atlas_category=atlas_category,
         )
         return
 
@@ -961,6 +1238,7 @@ def convert_path(input_path: Path, output_arg: str | None, recursive: bool, spli
         return
 
     unit_cache: dict[Path, str | None] = {}
+    atlas_category_cache: dict[Path, str | None] = {}
     files_by_parent: dict[Path, list[Path]] = {}
     for file_path in files:
         files_by_parent.setdefault(file_path.parent, []).append(file_path)
@@ -975,10 +1253,19 @@ def convert_path(input_path: Path, output_arg: str | None, recursive: bool, spli
         parent = file_path.parent
         if parent not in unit_cache:
             unit_cache[parent] = find_unit_name_in_folder(parent)
+        if parent not in atlas_category_cache:
+            atlas_category_cache[parent] = detect_atlas_category_in_folder(parent)
 
         stem = canonical_stem_for_file(file_path, unit_cache[parent])
         out_file = (out_dir / rel.parent / f"{stem}.png")
-        convert_one(file_path, out_file, split_mode, mirror, shared_layout=layout_cache.get(parent))
+        convert_one(
+            file_path,
+            out_file,
+            split_mode,
+            mirror,
+            shared_layout=layout_cache.get(parent),
+            atlas_category=atlas_category_cache.get(parent),
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
